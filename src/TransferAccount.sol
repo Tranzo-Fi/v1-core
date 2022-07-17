@@ -2,8 +2,8 @@
 pragma solidity 0.8.1;
 
 import "./aave/FlashLoanReceiverBaseV2.sol";
-import "./../interfaces/ILendingPoolAddressesProviderV2.sol";
-import "./../interfaces/ILendingPoolV2.sol";
+import "./interfaces/ILendingPoolAddressesProviderV2.sol";
+import "./interfaces/ILendingPoolV2.sol";
 import { SafeMath } from "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
