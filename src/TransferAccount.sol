@@ -6,12 +6,19 @@ import "./interfaces/ILendingPoolAddressesProviderV2.sol";
 import "./interfaces/ILendingPoolV2.sol";
 import { SafeMath } from "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
+/**
+* @author @brotherlymite Harsh Pandey
+* @title Tranzo smart contract
+*/
 contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
     using SafeMath for uint256;
+    uint256 private s_platformFee;
 
-    constructor(address _addressProvider)
+    constructor(address _addressProvider, uint256 _platformFee)
         FlashLoanReceiverBaseV2(_addressProvider)
-    {}
+    {
+        s_platformFee = _platformFee;
+    }
 
     struct DebtTokenBalance {
         address tokenAddress;
@@ -45,7 +52,7 @@ contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
 
         (address _sender, address _recipient, DebtTokenBalance[] memory _DebtTokenBalance, aTokenBalance[] memory _aTokenBalance) = abi.decode(params, (address, address, DebtTokenBalance[], aTokenBalance[]));
         
-        // Approve and Repay all Debt of Account 1
+        // Approve and Repay all Debt of sender
         for(uint i=0; i<_DebtTokenBalance.length; i++) {
             // Repay StableDebt
             if (_DebtTokenBalance[i].stableDebtTokenBalance != 0) {
@@ -59,17 +66,25 @@ contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
             }
         }
 
-        // Transfer all aTokens from Account 1 to Account 2
+        // Transfer all aTokens from sender to recipient
         for (uint i=0; i<_aTokenBalance.length; i++) {
             IERC20(_aTokenBalance[i].aTokenAddress).transferFrom(_sender, _recipient, _aTokenBalance[i].aTokenBalance);
         }
         
-        // Borrow all DebtTokens from Account 2 + Flash Loan premium
+        // Borrow all DebtTokens from recipient + Flash Loan premium + Platform Fees
         for(uint i=0; i<_DebtTokenBalance.length; i++) {
             bool flag = false;
             // Borrow StableDebt
             if (_DebtTokenBalance[i].stableDebtTokenBalance != 0) {
-                LENDING_POOL.borrow(_DebtTokenBalance[i].tokenAddress, _DebtTokenBalance[i].stableDebtTokenBalance.add(premiums[i]), 1, 0, _recipient);
+                uint256 totalStableDebtTokenFee = premiums[i].add(calculatePlatformFee(_DebtTokenBalance[i].stableDebtTokenBalance));
+                LENDING_POOL.borrow(
+                    _DebtTokenBalance[i].tokenAddress,
+                    _DebtTokenBalance[i].stableDebtTokenBalance.add(totalStableDebtTokenFee),
+                    1,
+                    0, 
+                    _recipient
+                );
+                if (s_platformFee != 0) IERC20(_DebtTokenBalance[i].tokenAddress).transfer(owner(), calculatePlatformFee(_DebtTokenBalance[i].stableDebtTokenBalance));
                 flag = true;
             }
             // Borrow VariableDebt
@@ -80,9 +95,11 @@ contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
                     borrowAmount = _DebtTokenBalance[i].variableDebtTokenBalance;
                 } else {
                     // Flash Loan Premium not borrowed
-                    borrowAmount = _DebtTokenBalance[i].variableDebtTokenBalance.add(premiums[i]);
+                    uint256 totalVariableDebtTokenFee = premiums[i].add(calculatePlatformFee(_DebtTokenBalance[i].variableDebtTokenBalance));
+                    borrowAmount = _DebtTokenBalance[i].variableDebtTokenBalance.add(totalVariableDebtTokenFee);
                 }
                 LENDING_POOL.borrow(_DebtTokenBalance[i].tokenAddress, borrowAmount, 2, 0, _recipient);
+                if (flag == false && s_platformFee != 0) IERC20(_DebtTokenBalance[i].tokenAddress).transfer(owner(), calculatePlatformFee(_DebtTokenBalance[i].variableDebtTokenBalance));
             }
         }
 
@@ -93,6 +110,24 @@ contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
         }
 
         return true;
+    }
+
+    /**
+     * @dev Calculates the platform fees to be paid by user
+     * @param amount The amount of debt token for which the fee has to be paid to the platform
+     * @return The platform fee to be paid in wei
+     */
+    function calculatePlatformFee(uint256 amount) private view returns(uint256) {
+        if (s_platformFee == 0) return 0;
+        return (amount.mul(s_platformFee)).div(10000);
+    }
+
+    /**
+     * @dev This function is to be called only by the owner which changes the platform fee
+     * @param _fee The new fee for the platform
+     */
+    function changePlatformFee(uint256 _fee) external onlyOwner {
+        s_platformFee = _fee;
     }
 
     function _flashloan(address[] memory assets, uint256[] memory amounts, bytes memory _params)
@@ -122,13 +157,18 @@ contract TransferAccount is FlashLoanReceiverBaseV2, Withdrawable {
         );
     }
 
-    // Should be called by Account 1
+    /**
+     * @dev Migrates AAVE V2 positions from sender to recipient by taking a flashloan
+     * @param _recipientAccount Address of the recipient to which the sender wants to migrate his positions to
+     * @param _DebtTokenBalance Contains all the Debt balances of the sender
+     * @param _aTokenBalance Contains all the balances of Collateral of the sender
+     */
     function transferAccount(
-        address _recipientAccount, 
-        DebtTokenBalance[] memory _DebtTokenBalance, 
+        address _recipientAccount,
+        DebtTokenBalance[] memory _DebtTokenBalance,
         aTokenBalance[] memory _aTokenBalance
-    ) public {
-
+    ) external {
+        require(_recipientAccount != msg.sender, "Invalid recipient address");
         bytes memory params = abi.encode(msg.sender, _recipientAccount, _DebtTokenBalance, _aTokenBalance);
         address[] memory assets = new address[](_DebtTokenBalance.length);
         uint256[] memory amounts = new uint256[](_DebtTokenBalance.length);
